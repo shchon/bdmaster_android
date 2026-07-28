@@ -1,32 +1,4 @@
-// Lazy Capacitor bridge
-interface CapacitorBridge {
-  Capacitor: { isNativePlatform(): boolean };
-  CapacitorHttp: {
-    request(opts: { url: string; method: string }): Promise<{ status: number; data: unknown }>;
-  };
-}
-
-let _bridge: CapacitorBridge | null = null;
-let _bridgeLoaded = false;
-
-async function loadBridge(): Promise<CapacitorBridge | null> {
-  if (_bridgeLoaded) return _bridge;
-  _bridgeLoaded = true;
-  try {
-    const mod = await import('@capacitor/core');
-    _bridge = mod as unknown as CapacitorBridge;
-  } catch {
-    _bridge = null;
-  }
-  return _bridge;
-}
-
-export async function isNative(): Promise<boolean> {
-  const bridge = await loadBridge();
-  if (!bridge) return false;
-  try { return bridge.Capacitor.isNativePlatform(); }
-  catch { return false; }
-}
+import { Capacitor, CapacitorHttp } from '@capacitor/core';
 
 export interface KLineRow {
   date: string;
@@ -60,6 +32,11 @@ function todayStr(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+export function isNative(): boolean {
+  try { return Capacitor.isNativePlatform(); }
+  catch { return false; }
+}
+
 /**
  * Fetch 60-day K-line for stock symbols.
  */
@@ -71,21 +48,17 @@ export async function fetchKlineData(stockIds: string[]): Promise<KLineRow[]> {
   const today = todayStr();
 
   if (cache && cache.date === today && cache.data.length > 0) {
-    // Use cached data, only fetch missing stocks
     const cachedIds = new Set(cache.data.map((r) => r.stock_id));
     const missingIds = uniqueIds.filter((id) => !cachedIds.has(id));
-
     if (missingIds.length === 0) {
       return cache.data.filter((r) => uniqueIds.includes(r.stock_id));
     }
-
     const newData = await _fetchKlineBatch(missingIds);
     const merged = [...cache.data, ...newData];
     _klineCache = { date: today, data: merged };
     return merged.filter((r) => uniqueIds.includes(r.stock_id));
   }
 
-  // Full fetch
   const data = await _fetchKlineBatch(uniqueIds);
   _klineCache = { date: today, data };
   return data;
@@ -94,6 +67,7 @@ export async function fetchKlineData(stockIds: string[]): Promise<KLineRow[]> {
 async function _fetchKlineBatch(symbols: string[]): Promise<KLineRow[]> {
   const results: KLineRow[] = [];
   const url = 'https://quotedata.cnfin.com/quote/v1/kline';
+  const native = isNative();
 
   for (const sym of symbols) {
     try {
@@ -109,64 +83,18 @@ async function _fetchKlineBatch(symbols: string[]): Promise<KLineRow[]> {
         data_count: '60',
       });
 
-      const native = await isNative();
+      const fullUrl = `${url}?${params.toString()}`;
+
       if (native) {
-        const bridge = await loadBridge();
-        const http = bridge!.CapacitorHttp;
-        const resp = await http.request({
-          url: `${url}?${params.toString()}`,
-          method: 'GET',
-        });
+        const resp = await CapacitorHttp.request({ url: fullUrl, method: 'GET' });
         if (resp.status !== 200) continue;
         const js = JSON.parse(resp.data as string);
-
-        const candle = js?.data?.candle;
-        if (!candle) continue;
-
-        const fields: string[] = candle.fields;
-        const rows: unknown[][] = candle[prodCode];
-        if (!rows || !Array.isArray(rows)) continue;
-
-        for (const row of rows) {
-          const obj: Record<string, unknown> = {};
-          fields.forEach((f: string, i: number) => { obj[f] = row[i]; });
-          results.push({
-            date: String(obj.min_time || ''),
-            close: Number(obj.close_px ?? 0),
-            open: Number(obj.open_px ?? 0),
-            high: Number(obj.high_px ?? 0),
-            low: Number(obj.low_px ?? 0),
-            volume: Number(obj.business_amount ?? 0),
-            code: prodCode,
-            stock_id: code,
-          });
-        }
+        _parseKlineResponse(js, prodCode, code, results);
       } else {
-        const resp = await fetch(`${url}?${params.toString()}`);
+        const resp = await fetch(fullUrl);
         if (!resp.ok) continue;
         const js = await resp.json();
-
-        const candle = js?.data?.candle;
-        if (!candle) continue;
-
-        const fields: string[] = candle.fields;
-        const rows: unknown[][] = candle[prodCode];
-        if (!rows || !Array.isArray(rows)) continue;
-
-        for (const row of rows) {
-          const obj: Record<string, unknown> = {};
-          fields.forEach((f: string, i: number) => { obj[f] = row[i]; });
-          results.push({
-            date: String(obj.min_time || ''),
-            close: Number(obj.close_px ?? 0),
-            open: Number(obj.open_px ?? 0),
-            high: Number(obj.high_px ?? 0),
-            low: Number(obj.low_px ?? 0),
-            volume: Number(obj.business_amount ?? 0),
-            code: prodCode,
-            stock_id: code,
-          });
-        }
+        _parseKlineResponse(js, prodCode, code, results);
       }
     } catch {
       // skip failed symbols
@@ -176,9 +104,32 @@ async function _fetchKlineBatch(symbols: string[]): Promise<KLineRow[]> {
   return results;
 }
 
+function _parseKlineResponse(js: Record<string, unknown>, prodCode: string, stockId: string, results: KLineRow[]): void {
+  const candle = (js?.data as Record<string, unknown>)?.candle as Record<string, unknown> | undefined;
+  if (!candle) return;
+
+  const fields = candle.fields as string[];
+  const rows = candle[prodCode] as unknown[][] | undefined;
+  if (!rows || !Array.isArray(rows)) return;
+
+  for (const row of rows) {
+    const obj: Record<string, unknown> = {};
+    fields.forEach((f: string, i: number) => { obj[f] = row[i]; });
+    results.push({
+      date: String(obj.min_time || ''),
+      close: Number(obj.close_px ?? 0),
+      open: Number(obj.open_px ?? 0),
+      high: Number(obj.high_px ?? 0),
+      low: Number(obj.low_px ?? 0),
+      volume: Number(obj.business_amount ?? 0),
+      code: prodCode,
+      stock_id: stockId,
+    });
+  }
+}
+
 /**
  * Compute 10-day and 60-day momentum for each stock.
- * Mirrors Python compute_stock_momentum_scores.
  */
 export function computeMomentum(
   stockIds: string[],

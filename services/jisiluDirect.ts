@@ -1,45 +1,11 @@
+import { Capacitor, CapacitorHttp } from '@capacitor/core';
+
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
-// Lazy Capacitor bridge import
-interface CapacitorBridge {
-  Capacitor: { isNativePlatform(): boolean };
-  CapacitorHttp: {
-    request(opts: {
-      url: string;
-      method: string;
-      headers?: Record<string, string>;
-      data?: string;
-    }): Promise<{ status: number; data: unknown; headers: Record<string, string> }>;
-  };
-}
-
-let _bridge: CapacitorBridge | null = null;
-let _bridgeLoaded = false;
-
-async function loadBridge(): Promise<CapacitorBridge | null> {
-  if (_bridgeLoaded) return _bridge;
-  _bridgeLoaded = true;
-  try {
-    const mod = await import('@capacitor/core');
-    _bridge = mod as unknown as CapacitorBridge;
-  } catch {
-    _bridge = null;
-  }
-  return _bridge;
-}
-
-export async function isNative(): Promise<boolean> {
-  const bridge = await loadBridge();
-  if (!bridge) return false;
-  try { return bridge.Capacitor.isNativePlatform(); }
+export function isNative(): boolean {
+  try { return Capacitor.isNativePlatform(); }
   catch { return false; }
-}
-
-async function nativeHttp(): Promise<CapacitorBridge['CapacitorHttp']> {
-  const bridge = await loadBridge();
-  if (!bridge) throw new Error('Capacitor bridge not available');
-  return bridge.CapacitorHttp;
 }
 
 // --- Cookie helpers ---
@@ -72,14 +38,27 @@ function extractSetCookie(headers: Record<string, string>): string {
 
 // --- HTTP helpers ---
 
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Request timeout after ${ms}ms`)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 async function nativeGet(url: string, extraHeaders?: Record<string, string>) {
-  const http = await nativeHttp();
+  console.log('[BondMaster] nativeGet:', url);
   const headers: Record<string, string> = {
     'User-Agent': UA,
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     ...extraHeaders,
   };
-  return http.request({ url, method: 'GET', headers });
+  return withTimeout(
+    CapacitorHttp.request({ url, method: 'GET', headers }),
+    20000,
+  );
 }
 
 async function nativePost(
@@ -88,7 +67,7 @@ async function nativePost(
   contentType: string,
   extraHeaders?: Record<string, string>,
 ) {
-  const http = await nativeHttp();
+  console.log('[BondMaster] nativePost:', url);
   const headers: Record<string, string> = {
     'User-Agent': UA,
     'Content-Type': contentType,
@@ -98,7 +77,10 @@ async function nativePost(
     'Referer': 'https://www.jisilu.cn/data/cbnew/',
     ...extraHeaders,
   };
-  return http.request({ url, method: 'POST', headers, data: body });
+  return withTimeout(
+    CapacitorHttp.request({ url, method: 'POST', headers, data: body }),
+    20000,
+  );
 }
 
 // --- Public API ---
@@ -121,48 +103,70 @@ export interface RawRedeemItem {
 
 /**
  * Login to jisilu.cn and return the session cookie string.
- * On web (dev mode), this is a no-op — use the backend proxy instead.
  */
 export async function jisiluLoginNative(username: string, password: string): Promise<JisiluSession> {
-  // Step 1: pre-fetch homepage to get initial cookies
-  const preResp = await nativeGet('https://www.jisilu.cn/');
-  const preCookies = parseSetCookie(extractSetCookie(preResp.headers));
-
-  // Step 2: login
-  const body = new URLSearchParams({
-    return_url: 'https://www.jisilu.cn/',
-    user_name: username,
-    password,
-    aes: '1',
-    auto_login: '1',
-  }).toString();
-
-  const loginResp = await nativePost(
-    'https://www.jisilu.cn/webapi/account/login_process/',
-    body,
-    'application/x-www-form-urlencoded; charset=UTF-8',
-    { Cookie: cookiesToHeader(preCookies), Referer: 'https://www.jisilu.cn/' },
-  );
-
-  // Check for login failure
   try {
-    const json = JSON.parse(loginResp.data as string);
-    if (json?.code === 413) {
-      throw new Error(json.msg || '手机号/用户名或密码不一致');
+    // Step 1: pre-fetch homepage to get initial cookies
+    console.log('[BondMaster] Step 1: pre-fetch jisilu.cn homepage...');
+    const preResp = await nativeGet('https://www.jisilu.cn/');
+    console.log('[BondMaster] Pre-fetch status:', preResp.status, 'headers:', JSON.stringify(preResp.headers));
+
+    const preCookies = parseSetCookie(extractSetCookie(preResp.headers));
+    console.log('[BondMaster] Pre-fetch cookies:', JSON.stringify(preCookies));
+
+    // Step 2: login
+    const body = new URLSearchParams({
+      return_url: 'https://www.jisilu.cn/',
+      user_name: username,
+      password,
+      aes: '1',
+      auto_login: '1',
+    }).toString();
+
+    console.log('[BondMaster] Step 2: login...');
+    const loginResp = await nativePost(
+      'https://www.jisilu.cn/webapi/account/login_process/',
+      body,
+      'application/x-www-form-urlencoded; charset=UTF-8',
+      { Cookie: cookiesToHeader(preCookies), Referer: 'https://www.jisilu.cn/' },
+    );
+
+    console.log('[BondMaster] Login status:', loginResp.status);
+
+    // Check for login failure (CapacitorHttp auto-parses JSON)
+    const loginData = loginResp.data;
+    if (typeof loginData === 'object' && loginData !== null) {
+      const json = loginData as Record<string, unknown>;
+      console.log('[BondMaster] Login JSON:', JSON.stringify(json).slice(0, 300));
+      if (json?.code === 413) {
+        throw new Error((json.msg as string) || '手机号或密码不一致');
+      }
+      if (json?.code !== 200 && json?.code !== undefined) {
+        throw new Error((json.msg as string) || `登录失败: code=${json.code}`);
+      }
+    } else {
+      console.log('[BondMaster] Login response is not JSON (expected on success), type:', typeof loginData);
     }
+
+    // Step 3: merge cookies
+    const loginCookies = parseSetCookie(extractSetCookie(loginResp.headers));
+    const merged = { ...preCookies, ...loginCookies };
+    const cookie = cookiesToHeader(merged);
+
+    if (!cookie) {
+      if (cookiesToHeader(preCookies)) {
+        console.log('[BondMaster] Using pre-fetch cookies only');
+        return { cookie: cookiesToHeader(preCookies) };
+      }
+      throw new Error('登录可能成功，但未获得 Cookie');
+    }
+
+    console.log('[BondMaster] Login success, cookie length:', cookie.length);
+    return { cookie };
   } catch (e: unknown) {
-    if (e instanceof SyntaxError) { /* not JSON, which is expected on success */ }
-    else if (e instanceof Error) throw e;
+    console.error('[BondMaster] Login error:', e instanceof Error ? e.message : String(e));
+    throw e;
   }
-
-  // Step 3: merge cookies
-  const loginCookies = parseSetCookie(extractSetCookie(loginResp.headers));
-  const merged = { ...preCookies, ...loginCookies };
-  const cookie = cookiesToHeader(merged);
-
-  if (!cookie) throw new Error('登录可能成功，但未获得 Cookie');
-
-  return { cookie };
 }
 
 /**
@@ -173,11 +177,13 @@ export async function jisiluFetchBonds(cookie: string): Promise<RawBondItem[]> {
   const baseUrl = `https://www.jisilu.cn/data/cbnew/cb_list_new/?___jsl=LST___t=${timestamp}`;
 
   // Warm up session
-  await nativeGet('https://www.jisilu.cn/data/cbnew/', {
-    Cookie: cookie,
-    'Cache-Control': 'no-cache',
-    Pragma: 'no-cache',
-  });
+  try {
+    await nativeGet('https://www.jisilu.cn/data/cbnew/', {
+      Cookie: cookie,
+      'Cache-Control': 'no-cache',
+      Pragma: 'no-cache',
+    });
+  } catch { /* not critical */ }
 
   const allRows: RawBondItem[] = [];
   const seenIds = new Set<string>();
@@ -199,17 +205,25 @@ export async function jisiluFetchBonds(cookie: string): Promise<RawBondItem[]> {
       throw new Error(`网络错误: HTTP ${resp.status}`);
     }
 
-    let data: Record<string, unknown>;
-    try {
-      data = JSON.parse(resp.data as string);
-    } catch {
-      throw new Error('集思录返回数据格式异常');
+    let respData: unknown = resp.data;
+    // CapacitorHttp may auto-parse JSON; if string, parse it
+    if (typeof respData === 'string') {
+      try { respData = JSON.parse(respData); } catch { /* keep as string */ }
     }
+
+    if (typeof respData === 'string') {
+      console.error('[BondMaster] Auth issue, string response:', (respData as string).slice(0, 500));
+      throw new Error('Cookie 可能已过期，请重新登录');
+    }
+
+    const data = respData as Record<string, unknown>;
 
     const rows = (data.rows as unknown[]) || [];
     if (total === null && typeof data.total === 'number') {
       total = data.total;
     }
+
+    console.log('[BondMaster] Page', page, '- rows:', rows.length, 'total:', total, 'keys:', Object.keys(data).join(','));
 
     if (rows.length === 0) break;
 
@@ -240,25 +254,66 @@ export async function jisiluFetchRedeem(cookie: string): Promise<RawRedeemItem[]
     'Cache-Control': 'no-cache',
     Pragma: 'no-cache',
     'X-Requested-With': 'XMLHttpRequest',
+    'Accept': 'application/json, text/javascript, */*; q=0.01',
   });
+
+  console.log('[BondMaster] Redeem status:', resp.status, 'data type:', typeof resp.data, 'length:', typeof resp.data === 'string' ? resp.data.length : JSON.stringify(resp.data).length);
 
   if (resp.status !== 200) return [];
 
-  const text = String(resp.data ?? '');
-  let data: unknown;
-  try { data = JSON.parse(text); } catch { data = text; }
+  let rawText = '';
+  if (typeof resp.data === 'string') {
+    rawText = resp.data;
+  } else if (typeof resp.data === 'object' && resp.data !== null) {
+    // CapacitorHttp auto-parsed JSON; stringify to extract the embedded array
+    rawText = JSON.stringify(resp.data);
+  }
 
+  // jisilu redeem endpoint returns text/JSON with embedded array: ...[{"bond_id":...}]...
+  // Try direct JSON array first
   let rowsList: unknown[] = [];
-  const d = data as Record<string, unknown>;
-  if (d?.rows) {
-    rowsList = d.rows as unknown[];
-  } else if (d?.data) {
-    const inner = d.data as Record<string, unknown>;
-    if (inner?.rows && Array.isArray(inner.rows)) {
-      rowsList = inner.rows as unknown[];
+  try {
+    const parsed = JSON.parse(rawText);
+    if (Array.isArray(parsed)) {
+      rowsList = parsed;
+      console.log('[BondMaster] Redeem: direct array,', rowsList.length, 'items');
     }
-  } else if (Array.isArray(data)) {
-    rowsList = data;
+  } catch { /* not an array */ }
+
+  // If not a direct array, find [{...}]} embedded pattern
+  if (rowsList.length === 0) {
+    const start = rawText.indexOf('[{');
+    const end = rawText.lastIndexOf('}]}');
+    if (start !== -1 && end !== -1) {
+      try {
+        rowsList = JSON.parse(rawText.slice(start, end + 2));
+        console.log('[BondMaster] Redeem: extracted array,', rowsList.length, 'items');
+      } catch {
+        console.log('[BondMaster] Redeem: failed to parse extracted JSON');
+      }
+    }
+  }
+
+  // Try object with .rows or .data.rows
+  if (rowsList.length === 0) {
+    const d = resp.data as Record<string, unknown>;
+    if (Array.isArray(d)) {
+      rowsList = d;
+    } else if (d?.rows && Array.isArray(d.rows)) {
+      rowsList = d.rows as unknown[];
+    } else if (d?.data) {
+      const inner = d.data as Record<string, unknown>;
+      if (Array.isArray(inner)) { rowsList = inner; }
+      else if (inner?.rows && Array.isArray(inner.rows)) { rowsList = inner.rows as unknown[]; }
+    }
+    if (rowsList.length > 0) {
+      console.log('[BondMaster] Redeem: found in object,', rowsList.length, 'items');
+    }
+  }
+
+  if (rowsList.length === 0) {
+    console.log('[BondMaster] Redeem: could not find data, keys:', typeof resp.data === 'object' && resp.data !== null ? Object.keys(resp.data as Record<string, unknown>).join(',') : 'n/a');
+    return [];
   }
 
   return rowsList.map((row: unknown) => {

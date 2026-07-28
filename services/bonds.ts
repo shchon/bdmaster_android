@@ -17,7 +17,7 @@ export const screenBonds = async (
   allBonds?: BondData[],
   scoreConfig?: ScoreConfig,
 ): Promise<ScreenBondsResponse> => {
-  if (await isNative() && allBonds) {
+  if (isNative() && allBonds) {
     // Local pipeline on mobile
     const cookie = getJisiluCookie();
 
@@ -132,7 +132,7 @@ export const screenBonds = async (
 };
 
 export const saveSnapshot = async (jisiluCookie?: string): Promise<{ filepath: string; bond_count: number }> => {
-  if (await isNative()) {
+  if (isNative()) {
     throw new Error('快照功能需要后端服务支持');
   }
 
@@ -145,7 +145,7 @@ export const saveSnapshot = async (jisiluCookie?: string): Promise<{ filepath: s
 };
 
 export const clearCache = async (): Promise<{ status: string; message: string }> => {
-  if (await isNative()) {
+  if (isNative()) {
     clearKlineCache();
     return { status: 'ok', message: '本地缓存已清除' };
   }

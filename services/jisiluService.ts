@@ -20,7 +20,7 @@ export const restoreJisiluCookie = () => {
 };
 
 export const loginJisilu = async ({ user_name, password }: LoginParams): Promise<boolean> => {
-  if (await isNative()) {
+  if (isNative()) {
     const session = await jisiluLoginNative(user_name, password);
     currentCookie = session.cookie;
     if (typeof window !== 'undefined') {
@@ -59,7 +59,7 @@ export const fetchJisiluData = async (scoreConfig?: ScoreConfig): Promise<BondDa
     throw new Error('尚未登录集思录');
   }
 
-  if (await isNative()) {
+  if (isNative()) {
     // Direct to jisilu.cn
     const rawBonds = await jisiluFetchBonds(currentCookie);
     const bonds = parseRawBonds(rawBonds);
@@ -95,6 +95,7 @@ export const fetchJisiluData = async (scoreConfig?: ScoreConfig): Promise<BondDa
       });
     }
 
+    console.log('[BondMaster] fetchJisiluData: parsed', bonds.length, 'bonds');
     bonds.sort((a, b) => a.doubleLow - b.doubleLow);
     return bonds;
   }
