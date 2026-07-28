@@ -1,0 +1,15 @@
+version: "3.8"
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      - JSL_USERNAME_HASH=${JSL_USERNAME_HASH}
+      - JSL_PASSWORD_HASH=${JSL_PASSWORD_HASH}
+      - BONDS_LOG_LEVEL=INFO
+      - BONDS_SNAPSHOT_DIR=/app/snapshots
+    volumes:
+      - ./snapshots:/app/snapshots
+    restart: unless-stopped

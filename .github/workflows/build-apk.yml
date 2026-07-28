@@ -1,0 +1,80 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'backend/**'
+      - '*.md'
+      - 'snapshots/**'
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        type: choice
+        options: ['debug', 'release']
+        default: 'debug'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Install Android SDK platform
+        run: |
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 || true
+          $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager "platforms;android-35"
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build Next.js static export
+        run: npm run export
+
+      - name: Sync Capacitor to Android
+        run: npx cap sync
+
+      - name: Grant gradlew execute permission
+        run: chmod +x android/gradlew
+
+      - name: Build Debug APK
+        if: ${{ inputs.build_type == 'debug' || github.event_name == 'push' }}
+        working-directory: android
+        run: ./gradlew assembleDebug
+
+      - name: Build Release APK (unsigned)
+        if: ${{ inputs.build_type == 'release' }}
+        working-directory: android
+        run: ./gradlew assembleRelease
+
+      - name: Upload Debug APK
+        if: ${{ inputs.build_type == 'debug' || github.event_name == 'push' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: BondMaster-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+
+      - name: Upload Release APK
+        if: ${{ inputs.build_type == 'release' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: BondMaster-release-unsigned
+          path: android/app/build/outputs/apk/release/app-release-unsigned.apk
+          retention-days: 90
