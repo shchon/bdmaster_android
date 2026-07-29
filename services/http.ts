@@ -26,10 +26,21 @@ export async function apiFetch(url: string, options?: RequestInit): Promise<Resp
     data: (options?.body ?? undefined) as string | undefined,
   });
 
-  return new Response(
-    typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data),
-    { status: resp.status, statusText: '', headers: new Headers(resp.headers ?? {}) },
-  );
+  // 204, 304, and 1xx statuses cannot have a body
+  const nullBodyStatus = resp.status === 204 || resp.status === 304 || (resp.status >= 100 && resp.status < 200);
+  const body = nullBodyStatus
+    ? null
+    : typeof resp.data === 'string'
+      ? resp.data
+      : resp.data != null
+        ? JSON.stringify(resp.data)
+        : null;
+
+  return new Response(body, {
+    status: resp.status,
+    statusText: '',
+    headers: new Headers(resp.headers ?? {}),
+  });
 }
 
 export async function apiPost<T = never>(
