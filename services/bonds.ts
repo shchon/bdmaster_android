@@ -1,7 +1,7 @@
 import { BondData, ScreenRequest, ScreenResult } from '../types';
 import { apiPost } from './http';
-import { isNative, jisiluFetchRedeem } from './jisiluDirect';
-import { runLocalPipeline } from './pipeline';
+import { isNative, jisiluFetchBonds, jisiluFetchRedeem } from './jisiluDirect';
+import { runLocalPipeline, parseRawBonds } from './pipeline';
 import { clearKlineCache } from './kline';
 import { getJisiluCookie } from './jisiluService';
 import { DEFAULT_SCORE_CONFIG, type ScoreConfig } from '../lib/scoreConfig';
@@ -21,6 +21,18 @@ export const screenBonds = async (
     // Local pipeline on mobile
     const cookie = getJisiluCookie();
 
+    // Refresh bond data from Jisilu
+    let freshData = allBonds;
+    if (cookie) {
+      try {
+        const rawBonds = await jisiluFetchBonds(cookie);
+        freshData = parseRawBonds(rawBonds);
+        console.log('[BondMaster] Refreshed', freshData.length, 'bonds from Jisilu');
+      } catch (e) {
+        console.warn('[BondMaster] Failed to refresh bonds, using cached data', e);
+      }
+    }
+
     // Refresh redeem info if we have a cookie
     let redeemMap = new Map<string, { bond_id: string; redeem_remain_days?: number; redeem_status?: string; redeem_icon?: string }>();
     if (cookie) {
@@ -31,7 +43,7 @@ export const screenBonds = async (
     }
 
     const result = await runLocalPipeline(
-      allBonds,
+      freshData,
       redeemMap,
       {
         max_price: payload.max_price,
